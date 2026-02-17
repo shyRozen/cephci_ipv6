@@ -138,6 +138,7 @@ def create_baremetal_ceph_nodes(cluster_conf):
                     "subnet": cluster_conf["ceph-cluster"]["networks"]["public"][0],
                     "location": node.get("location"),
                     "id": node_id,
+                    "jump_host": cluster_conf["ceph-cluster"].get("jump_host"),
                 }
             )
 
@@ -1337,9 +1338,11 @@ def create_ceph_conf(
     size = "osd pool default size = " + size + "\n"
     pgnum = "osd pool default pg num = " + pg_num + "\n"
     pgpnum = "osd pool default pgp num = " + pgp_num + "\n"
+    from utility.ipv6_utils import format_ip_for_ceph_mon
+
     for mhost in mon_hosts:
         mon_init_memb = mon_init_memb + mhost.shortname + ","
-        mon_host = mon_host + mhost.internal_ip + ","
+        mon_host = mon_host + format_ip_for_ceph_mon(mhost.internal_ip) + ","
     mon_init_memb = mon_init_memb[:-1] + "\n"
     mon_host = mon_host[:-1] + "\n"
     conf = "[global]\n"

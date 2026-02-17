@@ -383,6 +383,10 @@ def create_nodes(
                     ipv6_address=ipv6_address,
                     ipv6_subnet=ipv6_subnet,
                     use_ipv6=use_ipv6,
+                    ip_version=cluster.get("ceph-cluster", {}).get(
+                        "networks", {}
+                    ).get("ip_version", "ipv4"),
+                    jump_host=cluster.get("ceph-cluster", {}).get("jump_host"),
                 )
                 ceph_nodes.append(ceph)
 
@@ -398,6 +402,9 @@ def create_nodes(
             ceph_cluster_dict[cluster_name].networks = deepcopy(
                 cluster.get("ceph-cluster", {}).get("networks", {})
             )
+            ceph_cluster_dict[cluster_name].jump_host = cluster.get(
+                "ceph-cluster", {}
+            ).get("jump_host")
 
     # TODO: refactor cluster dict to cluster list
     log.info("Done creating osp instances")

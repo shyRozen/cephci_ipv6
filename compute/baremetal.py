@@ -38,6 +38,7 @@ class CephBaremetalNode:
         self.params = params
         self.location = params.get("location")
         self.private_key = params.get("root_private_key")
+        jump_host = params.get("jump_host")
         if self.private_key:
             self.private_key = expanduser(self.private_key)
             self.root_connection = SSHConnectionManager(
@@ -46,6 +47,7 @@ class CephBaremetalNode:
                 self.params.get("root_password"),
                 look_for_keys=True,
                 private_key_file_path=self.private_key,
+                jump_host=jump_host,
             )
         else:
             self.root_connection = SSHConnectionManager(
@@ -53,6 +55,7 @@ class CephBaremetalNode:
                 "root",
                 self.params.get("root_password"),
                 look_for_keys=False,
+                jump_host=jump_host,
             )
 
         self.rssh = self.root_connection.get_client

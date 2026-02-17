@@ -2745,18 +2745,21 @@ def get_ceph_version_from_repo(client, config):
 
 
 def find_free_port(host):
-    find_port = """
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.bind((\'localhost\', {PORT_NUMBER}))
-try:
-    _, port = s.getsockname()
-except:
-    port = None
-finally:
-    s.close()
-print(port)
-"""
+    from utility.ipv6_utils import is_ipv6_address
+
+    use_ipv6 = is_ipv6_address(host.ip_address)
+    af_family = "socket.AF_INET6" if use_ipv6 else "socket.AF_INET"
+    bind_addr = "\\\"::1\\\"" if use_ipv6 else "\\\"localhost\\\""
+
+    find_port = (
+        "import socket; "
+        "s = socket.socket({AF}, socket.SOCK_STREAM); "
+        "s.bind(({ADDR}, {{PORT_NUMBER}})); "
+        "port = s.getsockname()[1]; "
+        "s.close(); "
+        "print(port)"
+    ).format(AF=af_family, ADDR=bind_addr)
+
     for port in range(6000, 10000):
         out, _ = host.exec_command(
             cmd=f'python3 -c "{find_port.format(PORT_NUMBER=port)}"',

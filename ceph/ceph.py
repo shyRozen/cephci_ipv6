@@ -57,6 +57,7 @@ class Ceph(object):
         # When True, bootstrap/config may use IPv6 (OpenStack only);
         #  driven by config/custom_config
         self.use_ipv6 = False
+        self.jump_host = None
 
     def __eq__(self, ceph_cluster):
         if hasattr(ceph_cluster, "node_list"):
@@ -109,6 +110,11 @@ class Ceph(object):
             luminous_demon.is_active = (
                 False if self.rhcs_version < LooseVersion("3") else True
             )
+
+    @property
+    def is_ipv6(self) -> bool:
+        """Return True if the cluster is configured for IPv6 networking."""
+        return self.networks.get("ip_version", "ipv4") == "ipv6"
 
     def get_nodes(self, role=None, ignore=None):
         """
@@ -1304,6 +1310,7 @@ class SSHConnectionManager(object):
         private_key_file_path="",
         private_key_password=None,
         outage_timeout=600,
+        jump_host=None,
     ):
         self.ip_address = ip_address
         self.username = username
@@ -1324,6 +1331,8 @@ class SSHConnectionManager(object):
         self.__transport = None
         self.__outage_start_time = None
         self.outage_timeout = datetime.timedelta(seconds=outage_timeout)
+        self.jump_host = jump_host
+        self._jump_client = None
 
     @property
     def client(self):
@@ -1403,12 +1412,53 @@ class SSHConnectionManager(object):
             pass
         self.__transport = None
 
+    def _get_jump_host_key(self):
+        """Load the private key for jump host authentication."""
+        key_path = self.jump_host.get("private_key")
+        if not key_path:
+            return None
+        from os.path import expanduser
+
+        return self._get_ssh_key(expanduser(key_path))
+
+    def _close_jump_client(self):
+        """Close the jump host SSH client if open."""
+        if self._jump_client:
+            try:
+                self._jump_client.close()
+            except Exception:
+                pass
+            self._jump_client = None
+
     def __connect(self):
         """Establishes a connection with the remote host using the IP Address."""
         end_time = datetime.datetime.now() + self.outage_timeout
         last_error = None
         while end_time > datetime.datetime.now():
             try:
+                sock = None
+                if self.jump_host:
+                    self._close_jump_client()
+                    self._jump_client = paramiko.SSHClient()
+                    self._jump_client.set_missing_host_key_policy(
+                        paramiko.MissingHostKeyPolicy()
+                    )
+                    jump_pkey = self._get_jump_host_key()
+                    self._jump_client.connect(
+                        self.jump_host["ip"],
+                        username=self.jump_host["username"],
+                        password=self.jump_host.get("password"),
+                        pkey=jump_pkey,
+                        look_for_keys=bool(self.jump_host.get("private_key")),
+                        allow_agent=False,
+                    )
+                    jump_transport = self._jump_client.get_transport()
+                    sock = jump_transport.open_channel(
+                        "direct-tcpip",
+                        dest_addr=(self.ip_address, 22),
+                        src_addr=("", 0),
+                    )
+
                 auth = (
                     "key"
                     if self._private_key_file_path
@@ -1430,6 +1480,8 @@ class SSHConnectionManager(object):
                         False if self._private_key_file_path else self.look_for_keys
                     ),
                 }
+                if sock:
+                    connect_kw["sock"] = sock
                 if self._private_key_file_path:
                     # key_filename + passphrase (agent removed per user: agent did not work)
                     connect_kw["key_filename"] = [self._private_key_file_path]
@@ -1508,6 +1560,9 @@ class SSHConnectionManager(object):
         # pkey (paramiko/cryptography key) is not picklable; recreated in __setstate__
         if pickle_dict.get("pkey") is not None:
             del pickle_dict["pkey"]
+        # Jump client is not picklable; will reconnect on demand
+        if pickle_dict.get("_jump_client") is not None:
+            del pickle_dict["_jump_client"]
         return pickle_dict
 
     def __setstate__(self, state):
@@ -1515,6 +1570,7 @@ class SSHConnectionManager(object):
         self.__client = paramiko.SSHClient()
         self.__client.set_missing_host_key_policy(paramiko.MissingHostKeyPolicy())
         self.__transport = None
+        self._jump_client = None
         key_path = getattr(self, "_private_key_file_path", "") or ""
         self.pkey = (
             self._get_ssh_key(key_path) if self.look_for_keys and key_path else None
@@ -1587,6 +1643,8 @@ class CephNode(object):
         # Initial values from config; updated in connect() from remote hostname
         self.hostname = self.vmname
         self.shortname = self.vmshortname
+        self.ip_version = kw.get("ip_version", "ipv4")
+        self._jump_host = kw.get("jump_host")
 
         if kw.get("ceph_vmnode"):
             self.vm_node = kw["ceph_vmnode"]
@@ -1623,6 +1681,7 @@ class CephNode(object):
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
             private_key_password=self.private_key_password,
+            jump_host=self._jump_host,
         )
         self.connection = SSHConnectionManager(
             self.ip_address,
@@ -1631,6 +1690,7 @@ class CephNode(object):
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
             private_key_password=self.private_key_password,
+            jump_host=self._jump_host,
         )
         self.rssh = self.root_connection.get_client
         self.rssh_transport = self.root_connection.get_transport
@@ -1648,6 +1708,16 @@ class CephNode(object):
             key, value = each.rstrip().split("=")
             info_dict[key] = value.strip('"')
         return info_dict
+
+    @property
+    def ip_address_for_url(self) -> str:
+        """Return the IP address formatted for use in URLs.
+
+        IPv6 addresses are wrapped in brackets; IPv4 returned as-is.
+        """
+        from utility.ipv6_utils import format_ip_for_url
+
+        return format_ip_for_url(self.ip_address)
 
     @property
     def role(self):
@@ -1952,9 +2022,16 @@ class CephNode(object):
         """
         set the internal ip of the vm which differs from floating ip
         """
-        out, _ = self.exec_command(
-            cmd="/sbin/ifconfig eth0 | grep 'inet ' | awk '{ print $2}'"
-        )
+        if self.ip_version == "ipv6":
+            out, _ = self.exec_command(
+                cmd="ip -6 addr show scope global"
+                " | grep 'inet6' | awk '{print $2}'"
+                " | cut -d'/' -f1 | head -1"
+            )
+        else:
+            out, _ = self.exec_command(
+                cmd="/sbin/ifconfig eth0 | grep 'inet ' | awk '{ print $2}'"
+            )
         self.internal_ip = out.strip()
 
     def set_eth_interface(self, eth_interface):
@@ -2192,6 +2269,7 @@ class CephNode(object):
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
             private_key_password=key_pw,
+            jump_host=getattr(self, "_jump_host", None),
         )
         self.connection = SSHConnectionManager(
             self.ip_address,
@@ -2200,6 +2278,7 @@ class CephNode(object):
             look_for_keys=self.look_for_key,
             private_key_file_path=self.private_key_path,
             private_key_password=key_pw,
+            jump_host=getattr(self, "_jump_host", None),
         )
         self.rssh = self.root_connection.get_client
         self.ssh = self.connection.get_client
@@ -2311,11 +2390,12 @@ class CephNode(object):
                     if self.vmname == ceph_node.vmname:
                         logger.info("Skipping ping check on localhost")
                         continue
-                    self.exec_command(
-                        cmd="sudo ping -I {interface} -c 3 {ceph_node}".format(
-                            interface=eth_interface, ceph_node=ceph_node.shortname
-                        )
+                    ping_cmd = "sudo ping{v6} -I {interface} -c 3 {ceph_node}".format(
+                        v6=" -6" if self.ip_version == "ipv6" else "",
+                        interface=eth_interface,
+                        ceph_node=ceph_node.shortname,
                     )
+                    self.exec_command(cmd=ping_cmd)
                 logger.info(
                     "Suitable ethernet interface {eth_interface} found on {node}".format(
                         eth_interface=eth_interface, node=ceph_node.ip_address
