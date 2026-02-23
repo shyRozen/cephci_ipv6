@@ -151,7 +151,7 @@ def validate_dashboard(cls, out, user=None, password=None, port=None):
 
     for node in cls.cluster.get_nodes():
         if host_ in node.hostname:
-            host = host.replace(host_, node.ip_address)
+            host = host.replace(host_, node.ip_address_for_url)
             break
     else:
         raise BootStrapValidationFailure("Dashboard node not found")
