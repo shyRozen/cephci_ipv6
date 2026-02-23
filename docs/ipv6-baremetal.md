@@ -1,20 +1,30 @@
 # IPv6 Support for Baremetal Deployments
 
-CephCI supports IPv6 single-stack networking for baremetal deployments. IPv4 remains the default. When IPv6 is enabled, SSH access to target nodes is routed through a jump host (bastion) that bridges the IPv4 CI network and the IPv6 cluster network.
+CephCI supports IPv6 single-stack networking for baremetal deployments. IPv4 remains the default. When IPv6 is enabled, SSH access to target nodes is routed through a jump host (bastion) that bridges the IPv4 CI network and the IPv6 cluster network. An HTTP proxy on the bastion enables the CI runner to validate IPv6 dashboard and service URLs.
 
 ## Network Topology
 
 ```
-CI runner --IPv4--> jump host (bastion) --IPv6--> target nodes
+CI runner (IPv4-only)
+    |
+    |-- SSH (IPv4) to jump host --> SSH (IPv6) to Ceph nodes
+    |-- HTTP proxy (bastion:3128) --> IPv6 dashboard/service URLs
+    v
+Jump host / Bastion (dual-stack, Squid proxy)
+    |
+    | SSH (IPv6) to target nodes
+    v
+Ceph nodes (IPv6-only)
 ```
 
 - The CI runner connects to the jump host over IPv4.
-- The jump host forwards SSH connections to IPv6 target nodes via a `direct-tcpip` channel.
+- The jump host forwards SSH connections to IPv6 target nodes via a paramiko `direct-tcpip` channel.
+- Dashboard and service URL validation uses an HTTP proxy on the bastion to reach IPv6 endpoints.
 - All Ceph cluster traffic runs over IPv6.
 
 ## Configuration
 
-IPv6 is configured entirely through the cluster YAML under `globals`. Two new keys are used: `ip_version` (under `networks`) and `jump_host` (top-level under `ceph-cluster`).
+IPv6 is configured entirely through the cluster YAML under `globals`. Key fields: `ip_version` (under `networks`), `jump_host` (top-level under `ceph-cluster`), and `http_proxy` (for dashboard/service URL validation).
 
 ### Minimal Example
 
@@ -23,10 +33,10 @@ globals:
   - ceph-cluster:
       name: ceph
       jump_host:
-        hostname: bastion.example.com
         ip: 10.1.1.100
-        username: root
-        password: mypass
+        username: core
+        private_key: ~/.ssh/ocs4-jenkins
+      http_proxy: http://10.1.1.100:3128
       networks:
         public:
           - fd00::/64
@@ -36,7 +46,7 @@ globals:
           id: node1
           ip: fd00::a01:70a6
           role: [_admin, installer, osd]
-          root_private_key: ~/.ssh/id_rsa
+          root_private_key: ~/.ssh/ocs4-jenkins
           volumes: [/dev/sda]
 ```
 
@@ -63,6 +73,12 @@ When omitted, defaults to `ipv4` and all existing behavior is unchanged.
 
 \* Provide either `password` or `private_key` for authentication.
 
+#### `http_proxy`
+
+HTTP proxy URL (e.g. `http://10.1.1.100:3128`) used by the CI runner to reach IPv6 dashboard and service URLs for validation. Typically runs on the same bastion as the jump host since it has dual-stack connectivity.
+
+When absent or empty, no proxy is used (standard direct connections for IPv4 deployments).
+
 #### `nodes[].ip`
 
 For IPv6 clusters, each node's `ip` must be an IPv6 address reachable from the jump host.
@@ -80,11 +96,13 @@ Ensure one of the following before deployment:
 
 When `ip_version: ipv6` is set:
 
-- **SSH connections** are proxied through the jump host. The CI runner connects to the bastion over IPv4, then a forwarding channel reaches each IPv6 node.
+- **SSH connections** are proxied through the jump host. The CI runner connects to the bastion over IPv4, then a paramiko `direct-tcpip` forwarding channel reaches each IPv6 node.
 - **`set_internal_ip()`** discovers the node's global-scope IPv6 address (filtering out link-local `fe80::` addresses) instead of parsing `ifconfig eth0`.
 - **`search_ethernet_interface()`** uses `ping -6` instead of `ping` when probing interfaces.
 - **`create_ceph_conf()`** wraps monitor IPs in brackets (`[fd00::1]`) as required by Ceph's `mon host` configuration.
 - **`find_free_port()`** binds to `::1` with `AF_INET6` instead of `localhost` with `AF_INET`.
+- **Dashboard URL formatting** uses `ip_address_for_url` (bracketed, e.g. `https://[fd00::1]:8443/`) instead of bare `ip_address` to avoid ambiguity between IPv6 colons and port separator.
+- **Dashboard/service URL validation** (`test_bootstrap.py`, `ceph_admin/dashboard.py`) routes HTTP requests through the configured `http_proxy` so the IPv4 CI runner can reach IPv6 endpoints.
 
 ## What Does Not Change
 
@@ -110,11 +128,20 @@ All new code paths are guarded by `if ipv6` / `if jump_host` checks. When `ip_ve
 
 All functions are no-ops for IPv4 inputs.
 
+## Files Modified for Proxy Support
+
+| File | Changes |
+|------|---------|
+| `ceph/ceph.py` | `Ceph.http_proxy` attribute on cluster object |
+| `run.py` | Reads `http_proxy` from cluster config YAML into `Ceph.http_proxy` |
+| `tests/cephadm/test_bootstrap.py` | `verify_dashboard_login()` and `validate_dashboard()` use proxy |
+| `ceph/ceph_admin/dashboard.py` | `validate_url()`, `validate_enable_dashboard()`, `enable_alertmanager()`, `enable_prometheus()`, `enable_grafana()` use proxy via `cls.cluster.http_proxy` |
+
 ## Scope and Limitations
 
-This implementation covers the infrastructure layer only (SSH connectivity, IP discovery, config generation). The following are not yet supported and can be added when IPv6 test suites are needed:
+This implementation covers the infrastructure layer (SSH connectivity, IP discovery, config generation) and the deployment path (dashboard/service validation with proxy support). The following are not yet supported and can be added when IPv6 test suites are needed:
 
 - CephFS kernel mount address formatting
 - NFS mount address formatting
-- Dashboard URL formatting
-- REST API client URL formatting
+- REST API client URL formatting (`api/__init__.py`, `rest/common/utils/rest.py`)
+- Mgr restful test proxy support (`tests/mgr/test_restful_operations_*.py`)
