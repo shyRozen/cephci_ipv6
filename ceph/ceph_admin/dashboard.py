@@ -23,16 +23,18 @@ def execute_commands(cls, commands):
         LOG.error(f"Error:\n {err}")
 
 
-def validate_url(url):
+def validate_url(url, proxy=None):
     """Method to validate provided API URL.
     The HTTP 200 OK success status response code indicates that the request has succeeded.
 
     Args:
         url: URL of any API.
+        proxy: HTTP proxy URL for reaching IPv6 services (optional).
     """
 
     url = url.rstrip()
-    resp = requests.get(url, verify=False)
+    proxies = {"https": proxy, "http": proxy} if proxy else None
+    resp = requests.get(url, verify=False, proxies=proxies)
 
     if resp.status_code == 200:
         LOG.info("API validation is successful")
@@ -93,10 +95,11 @@ def enable_dashboard(cls, config):
     LOG.info(f"Output:\n {out}")
     LOG.error(f"Error:\n {err}")
 
-    validate_enable_dashboard(cls, user, pwd)
+    proxy = getattr(cls.cluster, "http_proxy", None) or None
+    validate_enable_dashboard(cls, user, pwd, proxy=proxy)
 
 
-def validate_enable_dashboard(cls, username, password):
+def validate_enable_dashboard(cls, username, password, proxy=None):
     """Method to validate dashboard login.
 
     After enabling the dashboard module validating by API login.
@@ -105,6 +108,7 @@ def validate_enable_dashboard(cls, username, password):
         cls (CephAdmin object): cephadm instance.
         username (str) : configured user name to login.
         password (str) : configured password to login.
+        proxy (str): HTTP proxy URL for reaching IPv6 dashboard (optional).
     """
     LOG.info("wait for some seconds for mgr to setup dashboard")
     sleep(100)
@@ -128,6 +132,8 @@ def validate_enable_dashboard(cls, username, password):
         "accept": "application/vnd.ceph.api.v1.0+json",
         "content-type": "application/json",
     }
+    if proxy:
+        session.proxies = {"https": proxy, "http": proxy}
 
     resp = session.post(url_, data=data, verify=False)
     if not resp.ok:
@@ -173,7 +179,8 @@ def enable_alertmanager(cls, config):
         execute_commands(cls, ALERTMANAGER_ENABLE_COMMANDS)
 
         url, _ = cls.shell(args=["ceph", "dashboard", "get-alertmanager-api-host"])
-        validate_url(url)
+        proxy = getattr(cls.cluster, "http_proxy", None) or None
+        validate_url(url, proxy=proxy)
     else:
         raise DaemonFailure("Daemon alertmanager does not exists")
 
@@ -212,7 +219,8 @@ def enable_prometheus(cls, config):
         execute_commands(cls, PROMETHEUS_ENABLE_COMMANDS)
 
         url, _ = cls.shell(args=["ceph", "dashboard", "get-prometheus-api-host"])
-        validate_url(url)
+        proxy = getattr(cls.cluster, "http_proxy", None) or None
+        validate_url(url, proxy=proxy)
     else:
         raise DaemonFailure("Daemon prometheus does not exists")
 
@@ -251,6 +259,7 @@ def enable_grafana(cls, config):
         execute_commands(cls, GRAFANA_ENABLE_COMMANDS)
 
         url, _ = cls.shell(args=["ceph", "dashboard", "get-grafana-api-url"])
-        validate_url(url)
+        proxy = getattr(cls.cluster, "http_proxy", None) or None
+        validate_url(url, proxy=proxy)
     else:
         raise DaemonFailure("Daemon grafana does not exists")

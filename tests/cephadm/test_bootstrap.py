@@ -28,12 +28,13 @@ class BootStrapValidationFailure(Exception):
     pass
 
 
-def verify_dashboard_login(url, data):
+def verify_dashboard_login(url, data, proxy=None):
     """Verify Ceph dashboard login using API call.
 
     Args:
         url: server url path
         data: credentials data in dict
+        proxy: HTTP proxy URL for reaching IPv6 dashboard (optional)
     Returns:
         boolean
     """
@@ -43,6 +44,8 @@ def verify_dashboard_login(url, data):
             "accept": "application/vnd.ceph.api.v1.0+json",
             "content-type": "application/json",
         }
+        if proxy:
+            session.proxies = {"https": proxy, "http": proxy}
 
         resp = session.post(url, data=data, verify=False)
         if not resp.ok:
@@ -159,12 +162,17 @@ def validate_dashboard(cls, out, user=None, password=None, port=None):
     data = json.dumps({"password": passwd_, "username": user_})
     url_ = f"{host}/api/auth" if not host.endswith("/") else f"{host}api/auth"
 
+    # Use HTTP proxy for IPv6 dashboard access (Jenkins agent can't reach IPv6 directly)
+    proxy = None
+    if hasattr(cls, "cluster") and getattr(cls.cluster, "http_proxy", None):
+        proxy = cls.cluster.http_proxy
+
     timeout = 600
     interval = 5
     end_time = datetime.now() + timedelta(seconds=timeout)
 
     while end_time > datetime.now():
-        if verify_dashboard_login(url=url_, data=data):
+        if verify_dashboard_login(url=url_, data=data, proxy=proxy):
             break
         sleep(interval)
     else:

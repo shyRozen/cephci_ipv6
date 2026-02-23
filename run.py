@@ -405,6 +405,9 @@ def create_nodes(
             ceph_cluster_dict[cluster_name].jump_host = cluster.get(
                 "ceph-cluster", {}
             ).get("jump_host")
+            ceph_cluster_dict[cluster_name].http_proxy = cluster.get(
+                "ceph-cluster", {}
+            ).get("http_proxy")
 
     # TODO: refactor cluster dict to cluster list
     log.info("Done creating osp instances")

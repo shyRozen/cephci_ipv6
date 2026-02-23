@@ -58,6 +58,7 @@ class Ceph(object):
         #  driven by config/custom_config
         self.use_ipv6 = False
         self.jump_host = None
+        self.http_proxy = None
 
     def __eq__(self, ceph_cluster):
         if hasattr(ceph_cluster, "node_list"):
