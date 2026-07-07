@@ -50,8 +50,8 @@ class OSD(ApplyMixin, Orch):
         """
         cmd = ["ceph orch device ls -f json"]
         self.shell(args=["ceph orch device ls --refresh"])
-        LOG.info("Sleeping for 120 seconds for disks to be discovered")
-        sleep(120)
+        LOG.info("Sleeping for 180 seconds for disks to be discovered")
+        sleep(180)
         out, _ = self.shell(args=cmd)
 
         node_device_dict = dict()
@@ -88,9 +88,9 @@ class OSD(ApplyMixin, Orch):
 
         super().apply(config)
 
-        # validate of osd(s)
-        interval = 5
-        timeout = self.TIMEOUT
+        # validate of osd(s) - extended timeout for vSphere/VSAN environments
+        interval = 10
+        timeout = 600
         checks = timeout / interval
 
         while checks:
