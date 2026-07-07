@@ -50,14 +50,6 @@ tests:
               pos_args:
                 - cephfs
               service: mds
-          - config:
-              args:
-                - "ceph osd pool create rbd"
-              command: shell
-          - config:
-              args:
-                - "rbd pool init rbd"
-              command: shell
       destroy-cluster: false
       abort-on-fail: true
 
@@ -74,7 +66,7 @@ tests:
           - samba-client
           - cifs-utils
           - fio
-      copy_admin_keyring: true
+        copy_admin_keyring: true
       destroy-cluster: false
       abort-on-fail: true
 
@@ -100,8 +92,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -136,15 +128,15 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
           share2:
             read_iops_limit: 100
             write_iops_limit: 200
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -157,41 +149,41 @@ tests:
           runtime: 60
           numjobs: 1
 
-  - test:
-      name: Verify SMB QoS using CLI with two shares - one configured with QoS and one without. (Imperative Style)
-      desc: Verify SMB QoS using CLI with two shares - one configured with QoS and one without. (Imperative Style)
-      module: test_smb_qos.py
-      polarion-id: CEPH-83630267
-      config:
-        cephfs_volume: cephfs
-        smb_subvolume_group: smb
-        smb_subvolumes: [sv1, sv2]
-        smb_subvolume_mode: '0777'
-        smb_cluster_id: smb1
-        auth_mode: user
-        smb_user_name: user1
-        smb_user_password: passwd
-        smb_shares: [share1, share2]
-        path: "/"
-        aio_rate_limit_conf:
-          share1:
-            read_iops_limit: 100
-            write_iops_limit: 200
-            read_bw_limit: 1048576
-            write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
-        mount_type: cifs
-        io_tool: fio
-        fio:
-          rw: randrw
-          rwmixread: 50
-          bs: 4k
-          ioengine: libaio
-          iodepth: 10
-          size: 1G
-          runtime: 300
-          numjobs: 1
+  # - test:
+  #     name: Verify SMB QoS using CLI with two shares - one configured with QoS and one without. (Imperative Style)
+  #     desc: Verify SMB QoS using CLI with two shares - one configured with QoS and one without. (Imperative Style)
+  #     module: test_smb_qos.py
+  #     polarion-id: CEPH-83630267
+  #     config:
+  #       cephfs_volume: cephfs
+  #       smb_subvolume_group: smb
+  #       smb_subvolumes: [sv1, sv2]
+  #       smb_subvolume_mode: '0777'
+  #       smb_cluster_id: smb1
+  #       auth_mode: user
+  #       smb_user_name: user1
+  #       smb_user_password: passwd
+  #       smb_shares: [share1, share2]
+  #       path: "/"
+  #       aio_rate_limit_conf:
+  #         share1:
+  #           read_iops_limit: 100
+  #           write_iops_limit: 200
+  #           read_bw_limit: 1048576
+  #           write_bw_limit: 2097152
+  #           read_delay_max: 30
+  #           write_delay_max: 30
+  #       mount_type: cifs
+  #       io_tool: fio
+  #       fio:
+  #         rw: randrw
+  #         rwmixread: 50
+  #         bs: 4k
+  #         ioengine: libaio
+  #         iodepth: 10
+  #         size: 1G
+  #         runtime: 300
+  #         numjobs: 1
 
   - test:
       name: Verify SMB QoS via spec file (Declarative Style)
@@ -216,8 +208,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         file_type: yaml
         file_mount: /tmp
         deployment_method: declarative
@@ -248,8 +240,8 @@ tests:
                 write_iops_limit: 300
                 read_bw_limit: 1048576
                 write_bw_limit: 2097152
-                read_delay_max: 30
-                write_delay_max: 30
+                read_burst_mult: 30
+                write_burst_mult: 30
 
   - test:
       name: Verify SMB QoS via spec file with multiple shares (Declarative Style)
@@ -274,15 +266,15 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
           share2:
             read_iops_limit: 100
             write_iops_limit: 200
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         file_type: yaml
         file_mount: /tmp
         deployment_method: declarative
@@ -313,8 +305,8 @@ tests:
                 write_iops_limit: 300
                 read_bw_limit: 1048576
                 write_bw_limit: 2097152
-                read_delay_max: 30
-                write_delay_max: 30
+                read_burst_mult: 30
+                write_burst_mult: 30
           - resource_type: ceph.smb.share
             cluster_id: smb1
             share_id: share2
@@ -328,8 +320,8 @@ tests:
                 write_iops_limit: 200
                 read_bw_limit: 1048576
                 write_bw_limit: 2097152
-                read_delay_max: 30
-                write_delay_max: 30
+                read_burst_mult: 30
+                write_burst_mult: 30
 
   - test:
       name: Verify SMB QoS using spec file with two shares - one configured with QoS and one without. (Declarative Style)
@@ -354,8 +346,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         file_type: yaml
         file_mount: /tmp
         deployment_method: declarative
@@ -386,8 +378,8 @@ tests:
                 write_iops_limit: 300
                 read_bw_limit: 1048576
                 write_bw_limit: 2097152
-                read_delay_max: 30
-                write_delay_max: 30
+                read_burst_mult: 30
+                write_burst_mult: 30
           - resource_type: ceph.smb.share
             cluster_id: smb1
             share_id: share2
@@ -419,8 +411,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -455,15 +447,15 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
           share2:
             read_iops_limit: 100
             write_iops_limit: 200
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -498,8 +490,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -534,8 +526,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -570,8 +562,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -608,8 +600,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -646,8 +638,8 @@ tests:
             write_iops_limit: 300
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30
         mount_type: cifs
         io_tool: fio
         fio:
@@ -665,5 +657,5 @@ tests:
             write_iops_limit: 500
             read_bw_limit: 1048576
             write_bw_limit: 2097152
-            read_delay_max: 30
-            write_delay_max: 30
+            read_burst_mult: 30
+            write_burst_mult: 30

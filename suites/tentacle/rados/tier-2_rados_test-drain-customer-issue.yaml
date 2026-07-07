@@ -32,7 +32,6 @@ tests:
                 platform: rhel-9
                 mon-ip: node1
                 orphan-initial-daemons: true
-                skip-monitoring-stack: true
           - config:
               command: add_hosts
               service: host
@@ -97,7 +96,10 @@ tests:
       config:
         command: add
         id: client.1                      # client Id (<type>.<Id>)
-        node: node7                       # client node
+        nodes:                            # client node
+          - node7:
+              release: 7.1
+              tag: z0
         install_packages:
           - ceph-common
         copy_admin_keyring: true          # Copy admin keyring to node

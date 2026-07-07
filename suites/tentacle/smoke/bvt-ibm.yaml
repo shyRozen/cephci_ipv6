@@ -82,6 +82,7 @@ tests:
         install_packages:
           - ceph-common
           - samba-client
+          - nfs-utils
         copy_admin_keyring: true
       desc: Configure the client system
       destroy-cluster: false
@@ -153,6 +154,7 @@ tests:
       config:
         gw_node: node6
         rbd_pool: nvme_pool
+        nvme_metadata_pool: nvme_pool
         gw_group: gw_group1
         do_not_create_image: true
         rep-pool-only: true
@@ -187,13 +189,13 @@ tests:
       config:
         cephfs_volume: cephfs
         smb_subvolume_group: smb
-        smb_subvolumes: [sv1, sv2]
+        smb_subvolumes: [sv1]
         smb_subvolume_mode: '0777'
         smb_cluster_id: smb1
         auth_mode: user
         smb_user_name: user1
         smb_user_password: passwd
-        smb_shares: [share1, share2]
+        smb_shares: [share1]
         path: "/"
 
   - test:

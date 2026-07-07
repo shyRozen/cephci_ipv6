@@ -107,6 +107,9 @@ def run(ceph_cluster, **kw):
         Ceph(client).fs.sub_volume_group.create(volume=fs_name, group=subvolume_group)
         CephAdm(installer).ceph.nfs.cluster.validate_rpcbind_running(installer[0])
 
+        if cluster_qos:
+            log.info("-" * 20 + "cluster_qos feature test" + "-" * 20)
+
         # Setup NFS cluster
         setup_nfs_cluster(
             clients=clients,
@@ -121,6 +124,8 @@ def run(ceph_cluster, **kw):
             ceph_cluster=ceph_cluster,
             round_robin=True if cluster_qos else False,
             single_export=True if cluster_qos else False,
+            enable_rdma=config.get("enable_rdma", False),
+            rdma_port=config.get("rdma_port"),
         )
 
         target_clients = clients if cluster_qos else client
@@ -147,7 +152,6 @@ def run(ceph_cluster, **kw):
                 cluster_name=cluster_name,
                 qos_type=qos_type,
                 operation=control,
-                cluster_qos=cluster_qos,
                 **cluster_ops,
             )
 
@@ -282,7 +286,6 @@ def run(ceph_cluster, **kw):
                 cluster_name=cluster_name,
                 qos_type=qos_type,
                 operation=control,
-                cluster_qos=cluster_qos,
             )
 
         if export_ops:

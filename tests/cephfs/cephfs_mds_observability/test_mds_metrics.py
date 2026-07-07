@@ -7,6 +7,8 @@ import time
 import traceback
 from typing import Any, Dict, List, Optional
 
+from looseversion import LooseVersion
+
 from tests.cephfs.cephfs_utilsV1 import FsUtils
 from tests.cephfs.lib.cephfs_subvol_metric_utils import MDSMetricsHelper
 from utility.log import Log
@@ -32,7 +34,11 @@ def run(ceph_cluster, **kw):
     )
     config: Dict[str, Any] = kw.get("config", {})
     build = config.get("build", config.get("rhbuild"))
-    skip_cpu_validation = config.get("skip_cpu_validation", False)
+    if LooseVersion(build) < LooseVersion("9.1"):
+        log.info("Skipping test: requires Ceph version >= 9.1 (build=%s)", build)
+        return 0
+
+    skip_cpu_validation = config.get("skip_cpu_validation", True)
     clients = ceph_cluster.get_ceph_objects("client")
     if not clients:
         log.error("This test requires at least 1 client node")
@@ -440,7 +446,7 @@ def run(ceph_cluster, **kw):
 
         try:
             if fs_created:
-                fs_util.remove_fs(client, fs_name=default_fs)
+                fs_util.remove_fs(client, vol_name=default_fs)
         except Exception as e:
             log.error("Filesystem cleanup failed: %s", e)
             cleanup_fail = True

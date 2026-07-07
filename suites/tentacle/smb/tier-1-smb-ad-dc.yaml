@@ -50,14 +50,6 @@ tests:
               pos_args:
                 - cephfs
               service: mds
-          - config:
-              args:
-                - "ceph osd pool create rbd"
-              command: shell
-          - config:
-              args:
-                - "rbd pool init rbd"
-              command: shell
       destroy-cluster: false
       abort-on-fail: true
 
@@ -72,7 +64,7 @@ tests:
         install_packages:
           - ceph-common
           - samba-client
-      copy_admin_keyring: true
+        copy_admin_keyring: true
       destroy-cluster: false
       abort-on-fail: true
 
@@ -84,7 +76,7 @@ tests:
       config:
         cephfs_volume: cephfs
         smb_subvolume_group: smb
-        smb_subvolumes: [sv1, sv2]
+        smb_subvolumes: [sv1]
         smb_subvolume_mode: '0777'
         smb_cluster_id: smb1
         auth_mode: active-directory
@@ -92,7 +84,7 @@ tests:
         custom_dns: "10.243.96.96"
         smb_user_name: Administrator
         smb_user_password: Redhat@123
-        smb_shares: [share1, share2]
+        smb_shares: [share1]
         path: "/"
 
   - test:
@@ -146,7 +138,7 @@ tests:
       config:
         cephfs_volume: cephfs
         smb_subvolume_group: smb
-        smb_subvolumes: [sv1, sv2]
+        smb_subvolumes: [sv1]
         smb_subvolume_mode: '0777'
         smb_cluster_id: smb1
         auth_mode: active-directory
@@ -154,7 +146,7 @@ tests:
         custom_dns: "10.243.96.96"
         smb_user_name: Administrator
         smb_user_password: Redhat@123
-        smb_shares: [share1, share2]
+        smb_shares: [share1]
         path: "/"
 
   - test:
@@ -184,7 +176,7 @@ tests:
       config:
         cephfs_volume: cephfs
         smb_subvolume_group: smb
-        smb_subvolumes: [sv1,sv2]
+        smb_subvolumes: [sv1]
         smb_subvolume_mode: '0777'
         smb_cluster_id: smb1
         auth_mode: active-directory
@@ -192,7 +184,7 @@ tests:
         custom_dns: "10.243.96.96"
         smb_user_name: Administrator
         smb_user_password: Redhat@123
-        smb_shares: [share1,share2]
+        smb_shares: [share1]
         path: "/"
 
   - test:

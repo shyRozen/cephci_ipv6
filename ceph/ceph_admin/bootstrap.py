@@ -8,7 +8,12 @@ from typing import Dict
 from looseversion import LooseVersion
 
 from ceph.ceph_admin.cephadm_ansible import CephadmAnsible
-from ceph.utils import get_node_by_id, get_public_network, setup_repos
+from ceph.utils import (
+    get_node_by_id,
+    get_public_network,
+    get_public_network_ipv6,
+    setup_repos,
+)
 from cephci.utils.build_info import CephTestManifest
 from utility.log import Log
 from utility.utils import get_cephci_config
@@ -26,8 +31,23 @@ __DEFAULT_KEYRING_PATH = "/etc/ceph/ceph.client.admin.keyring"
 __DEFAULT_SSH_PATH = "/etc/ceph/ceph.pub"
 
 
+def _detect_registry_tier(registry: str, build_type: str) -> str:
+    """Return credential tier (cdn/stage) from registry host, else from build_type."""
+    if not registry:
+        return "cdn" if build_type in ("released", "cdn") else "stage"
+    if "registry.redhat.io" in registry or "cp.icr.io" in registry:
+        return "cdn"
+    if "stage" in registry or "stg" in registry or "quay" in registry:
+        return "stage"
+    return "cdn" if build_type in ("released", "cdn") else "stage"
+
+
 def construct_registry(
-    cls, registry: str, json_file: bool = False, ibm_build: bool = False
+    cls,
+    registry: str,
+    json_file: bool = False,
+    product: str = "redhat",
+    build_type: str = "released",
 ):
     """
     Construct registry credentials for bootstrapping cluster
@@ -36,7 +56,11 @@ def construct_registry(
         cls (CephAdmin): class object
         registry (Str): registry name
         json_file (Bool): registry credentials in JSON file (default:False)
-        ibm_build: flag to fetch IBM registry creds
+        product: ceph product - ibm/redhat
+        build_type: CLI build type (released|cdn|stage|nightly etc.)
+
+    Registry tier is chosen from the registry hostname when it matches a known
+    RH/IBM host; otherwise build_type is used (released/cdn -> cdn, else stage).
 
     Example::
 
@@ -48,13 +72,30 @@ def construct_registry(
     Returns:
         constructed string of registry credentials ( Str )
     """
-    # Todo: Retrieve credentials based on registry name
-    build_type = "ibm" if ibm_build else "rh"
+    _vendor = "ibm" if "ibm" in product else "rh"
 
     _config = get_cephci_config()
-    cdn_cred = _config.get(
-        f"{build_type}_registry_credentials", _config["cdn_credentials"]
+    _reg = registry if registry else ""
+    _tier = _detect_registry_tier(_reg, build_type)
+    logger.debug(
+        "Registry tier selection: registry=%r tier=%r build_type=%r vendor=%r",
+        _reg,
+        _tier,
+        build_type,
+        _vendor,
     )
+
+    # Prefer the nested credentials.registry.<vendor>.<tier> path which
+    # carries separate entries for cdn (cp.icr.io) vs stage (cp.stg.icr.io).
+    cdn_cred = (
+        _config.get("credentials", {}).get("registry", {}).get(_vendor, {}).get(_tier)
+    )
+
+    if not cdn_cred:
+        # Fall back to the flat top-level key (legacy config layout)
+        cdn_cred = _config.get(
+            f"{_vendor}_registry_credentials", _config["cdn_credentials"]
+        )
     reg_args = {
         "registry-url": cdn_cred.get("registry", registry),
         "registry-username": cdn_cred.get("username"),
@@ -242,7 +283,7 @@ class BootstrapMixin:
         elif build_type == "released" and base_url == manifest_obj.repository:
             custom_image = False
             self.cluster.use_cdn = True
-            self.set_cdn_tool_repo()
+            self.set_cdn_tool_repo(manifest_obj)
         elif custom_repo:
             self.set_tool_repo(repo=custom_repo)
         else:
@@ -269,8 +310,12 @@ class BootstrapMixin:
         else:
             _os_major = manifest_obj.platform.split("-")[-1]
             _ceph_version = manifest_obj.ceph_version
-            # * is to enable any test hotfix provided
-            _rpm_version = f"2:{_ceph_version}*.el{_os_major}cp"
+            if build_type == "upstream" or manifest_obj.product == "community":
+                _rpm_version = f"{_ceph_version}*"
+            else:
+                # * is to enable any test hotfix provided
+                _rpm_version = f"2:{_ceph_version}.el{_os_major}cp"
+
             self.install(**{"rpm_version": _rpm_version})
 
         cmd = "cephadm"
@@ -289,28 +334,23 @@ class BootstrapMixin:
         registry_url = args.pop("registry-url", None)
         registry_json = args.pop("registry-json", None)
 
-        # Auto-detect registry from custom_image and add credentials if needed
-        if custom_image and not registry_url and not registry_json:
-            if isinstance(custom_image, str):
-                image_registry = custom_image.split("/")[0]
-            else:
-                image_registry = self.config["container_image"].split("/")[0]
+        # Auto-detect registry from custom_image or container image and add credentials if needed
+        if custom_image and isinstance(custom_image, str):
+            image_registry = custom_image.split("/")[0]
+        else:
+            image_registry = self.config["container_image"].split("/")[0]
 
-            # If using stage or production registry, auto-add credentials
-            if (
-                "registry.stage.redhat.io" in image_registry
-                or "registry.redhat.io" in image_registry
-            ):
-                registry_url = image_registry
-                logger.info(
-                    f"Auto-detected registry {registry_url} from custom image, adding credentials"
-                )
+        registry_url = image_registry
+        logger.info(
+            f"Auto-detected registry {registry_url} from container image, adding credentials"
+        )
 
         if registry_url or manifest_obj.product == "ibm":
             cmd += construct_registry(
                 self,
                 registry_url,
-                ibm_build=True if manifest_obj.product == "ibm" else False,
+                product=manifest_obj.product,
+                build_type=build_type,
             )
 
         if registry_json:
@@ -318,7 +358,8 @@ class BootstrapMixin:
                 self,
                 registry_json,
                 json_file=True,
-                ibm_build=True if manifest_obj.product == "ibm" else False,
+                product=manifest_obj.product,
+                build_type=build_type,
             )
 
         # Generate dashboard certificate and key if bootstrap cli
@@ -342,7 +383,12 @@ class BootstrapMixin:
         )
         if not mon_node:
             raise ResourceNotFoundError(f"Unknown {mon_node} node name.")
-        cmd += f" --mon-ip {mon_node.ip_address}"
+        # Use IPv6 for mon only when requested and available (OpenStack dual-stack)
+        use_ipv6 = getattr(self.cluster, "use_ipv6", False)
+        mon_ip = getattr(mon_node, "ipv6_address", None) if use_ipv6 else None
+        if mon_ip is None:
+            mon_ip = mon_node.ip_address
+        cmd += f" --mon-ip {mon_ip}"
 
         # Bootstrap with Ceph service specification
         specs = args.get("apply-spec")
@@ -363,12 +409,29 @@ class BootstrapMixin:
         if rhbuild.split("-")[0] in ["5.1", "5.2"]:
             cmd += " --yes-i-know"
 
+        # IBM Storage Ceph 9.1 and greater would require to accept the license
+        # There is '--automatically-accept-license' option
+        if manifest_obj.product == "ibm" and LooseVersion(
+            str(manifest_obj.release)
+        ) >= LooseVersion("9.1"):
+            if "automatically-accept-license" not in cmd:
+                cmd += " --automatically-accept-license"
+
         out, err = self.installer.exec_command(
             sudo=True,
             cmd=cmd,
             timeout=600,
             check_ec=True,
         )
+
+        # Silence the alerts to prevent downstream tests erroring when
+        # callhome
+        if (
+            manifest_obj.product == "ibm"
+            and LooseVersion(str(manifest_obj.release)) >= LooseVersion("9.1")
+            and "call-home" not in cmd
+        ):
+            self.shell(args=["ceph", "orch", "accept", "call-home-enabled"], timeout=60)
 
         logger.info("Bootstrap output : %s", out)
         logger.error("Bootstrap error: %s", err)
@@ -422,6 +485,11 @@ class BootstrapMixin:
             public_nws = ",".join(
                 [public_nws, get_public_network(self.cluster.get_nodes())]
             )
+            # Append IPv6 public networks only when requested and available
+            if getattr(self.cluster, "use_ipv6", False):
+                ipv6_nws = get_public_network_ipv6(self.cluster.get_nodes())
+                if ipv6_nws:
+                    public_nws = ",".join([public_nws, ipv6_nws])
             public_nws = ",".join(filter(lambda x: x, list(set(public_nws.split(",")))))
 
         if public_nws:
@@ -446,19 +514,6 @@ class BootstrapMixin:
             self.shell(
                 args=["ceph", "config", "set", "global cluster_network", cluster_nws]
             )
-        if self.cluster.rhcs_version >= LooseVersion("8.0"):
-            wa_txt = """
-            Disabling the balancer module as a WA for bug : https://bugzilla.redhat.com/show_bug.cgi?id=2314146
-            Issue : If any mgr module based operation is performed right after mgr failover, The command execution fails
-            as the module isn't loaded by mgr daemon. Issue was identified to be with Balancer module.
-            Disabling automatic balancing on the cluster as a WA until we get the fix for the same.
-            Disabling balancer should unblock Upgrade tests.
-            Error snippet :
-    Error ENOTSUP: Warning: due to ceph-mgr restart, some PG states may not be up to date
-    Module 'crash' is not enabled/loaded (required by command 'crash ls'): use `ceph mgr module enable crash` to enable
-            """
-            logger.info(wa_txt)
-            self.shell(args=["ceph balancer off"])
 
         # validate spec file
         if specs:

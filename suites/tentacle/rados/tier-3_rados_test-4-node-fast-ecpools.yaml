@@ -32,7 +32,7 @@ tests:
               args:
                 mon-ip: node1
                 rhcs-version: 8.1
-                release: rc
+                release: released
                 platform: rhel-9
 
   - test:
@@ -151,12 +151,14 @@ tests:
       config:
         command: add
         id: client.1                      # client Id (<type>.<Id>)
-        node: node6                     # client node
+        nodes:                            # client node
+          - node6:
+              release: 8.1
+              tag: released
         install_packages:
           - ceph-common
           - ceph-base
           - ceph-fuse
-          - fio
 #          - ceph-test  # Not packaged downstream, need test changes to install it via upstream repos
         copy_admin_keyring: true
         caps:
@@ -164,6 +166,15 @@ tests:
           osd: "allow *"
           mds: "allow *"
           mgr: "allow *"
+
+  - test:
+      desc: Install fio
+      module: exec.py
+      name: Install FIO
+      config:
+        sudo: true
+        commands:
+          - "dnf install fio -y"
 
   - test:
       name: Enable logging to file

@@ -7,7 +7,6 @@ from cli.utilities.utils import build_cmd_from_args
 from utility.log import Log
 from utility.utils import get_ceph_version_from_cluster
 
-from .cluster_qos import Cluster_qos
 from .qos import Qos
 
 log = Log(__name__)
@@ -18,7 +17,6 @@ class Cluster(Cli):
         super(Cluster, self).__init__(nodes)
         self.base_cmd = f"{base_cmd} cluster"
         self.qos = Qos(nodes, self.base_cmd)
-        self.cluster_qos = Cluster_qos(nodes, self.base_cmd)
 
     def create(
         self,
@@ -29,6 +27,9 @@ class Cluster(Cli):
         active_standby=False,
         nfs_nodes_obj=None,
         check_ec=True,
+        enable_rdma=False,
+        rdma_port=None,
+        enable_virtual_server=False,
         **kwargs,
     ):
         """
@@ -39,10 +40,29 @@ class Cluster(Cli):
             ha (bool): Flag to check if HA is required
             vip (str): Vip for the HA cluster
             active_standby (bool): Flag to check if active standby is required
+            enable_rdma (bool): Pass --enable-rdma to enable RDMA transport
+            rdma_port (int|str|None): RDMA listener port (--rdma_port)
+            enable_virtual_server (bool): Pass --enable-virtual-server for
+                multi-network NFS (Regional File Mount / Virtual Server).
             **kwargs: Additional keyword arguments.
             If nfs_version=3 is provided and ceph version > 19.2.1-300,
                     --enable-nfsv3 flag will be added
         """
+        # Validate enable_virtual_server parameter
+        if not isinstance(enable_virtual_server, bool):
+            raise TypeError(
+                f"enable_virtual_server must be bool, got {type(enable_virtual_server)}"
+            )
+
+        # Validate rdma_port parameter
+        if rdma_port is not None:
+            try:
+                rdma_port_int = int(rdma_port)
+                if not (1 <= rdma_port_int <= 65535):
+                    raise ValueError(f"rdma_port must be 1-65535, got {rdma_port_int}")
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"Invalid rdma_port: {exc}")
+
         nfs_server = nfs_server if type(nfs_server) in (list, tuple) else [nfs_server]
         nfs_server = " ".join(nfs_server)
         if active_standby and ha:
@@ -50,6 +70,14 @@ class Cluster(Cli):
         cmd = "{0} create {1} '{2}'".format(self.base_cmd, name, nfs_server)
         if ha:
             cmd += " --ingress --virtual-ip {0}".format(vip)
+
+        if enable_rdma:
+            cmd += " --enable-rdma"
+            if rdma_port is not None:
+                cmd += f" --rdma_port {rdma_port}"
+
+        if enable_virtual_server:
+            cmd += " --enable-virtual-server"
 
         # Check if --enable-nfsv3 flag needs to be added
         # Condition: ceph version > 19.2.1-300 AND nfs_version == 3
@@ -78,7 +106,11 @@ class Cluster(Cli):
                     f"Continuing without the flag."
                 )
 
-        cmd = "".join(cmd + build_cmd_from_args(**kwargs))
+        # Explicit params above own these flags; filter so a shared kwargs dict
+        # remains available to callers without mutating reserved keys.
+        reserved = {"enable_virtual_server", "rdma_port", "nfs_version"}
+        passthrough = {k: v for k, v in kwargs.items() if k not in reserved}
+        cmd = "".join(cmd + build_cmd_from_args(**passthrough))
         try:
             out = self.execute(sudo=True, cmd=cmd, check_ec=check_ec)
         except Exception as e:

@@ -1,9 +1,11 @@
 import ast
+import ipaddress
 import json
 import re
 import time
 from typing import Type, Union
 
+from looseversion import LooseVersion
 from packaging.version import Version
 
 from ceph.ceph import Ceph, CommandFailed
@@ -78,6 +80,35 @@ def setup_firewalld(nodes) -> None:
         for cmd in firewalld_cmds:
             node.exec_command(cmd=cmd, sudo=True)
         LOG.info("Configured firewalld to allow port range: %s", port_range)
+
+
+def check_and_enable_nvmeof_module(**kwargs):
+    """Check and enable NVMeoF module if not enabled."""
+    ceph_cluster = kwargs.get("ceph_cluster")
+    orch = Orch(ceph_cluster, **{})
+    ceph_version = kwargs.get("ceph_version")
+    if LooseVersion(ceph_version) >= LooseVersion("20.2.1"):
+        LOG.info(
+            f"Checking and enabling NVMeoF module for ceph version: {ceph_version}"
+        )
+        out, _ = orch.shell(args=["ceph", "mgr", "module", "ls", "--format", "json"])
+        modules = json.loads(out)
+        if "nvmeof" not in modules["enabled_modules"]:
+            LOG.info(f"Enabling NVMeoF module for ceph version: {ceph_version}")
+            out, _ = orch.shell(args=["ceph", "mgr", "module", "enable", "nvmeof"])
+            out, _ = orch.shell(
+                args=["ceph", "mgr", "module", "ls", "--format", "json"]
+            )
+            modules = json.loads(out)
+            if "nvmeof" not in modules["enabled_modules"]:
+                raise Exception(
+                    f"Failed to enable NVMeoF module for ceph version: {ceph_version}"
+                )
+            LOG.info(
+                f"NVMeoF module enabled successfully for ceph version: {ceph_version}"
+            )
+        else:
+            LOG.info(f"NVMeoF module already enabled for ceph version: {ceph_version}")
 
 
 def apply_nvme_sdk_cli_support(ceph_cluster, config):
@@ -636,16 +667,16 @@ def validate_io(orch, namespaces, negative=False):
 
     def io_value(ns):
         sub_ns, pool, image = ns.rsplit("|", 2)
+        # Handle both {pool}/{image} and {pool}/{namespace}/{image} formats
+        rbd_path = f"{pool}/{image}"
         count = 3
         samples = []
         for _ in range(count):
-            out, _ = orch.shell(
-                args=[f"rbd --format json du {pool}/{image}"], timeout=600
-            )
+            out, _ = orch.shell(args=[f"rbd --format json du {rbd_path}"], timeout=600)
             out = json.loads(out)["images"][0]
             samples.append(out)
             time.sleep(6)
-        return sub_ns, f"{pool}/{image}", samples
+        return sub_ns, rbd_path, samples
 
     def validate_incremetal_io(write_samples):
         for i in range(len(write_samples) - 1):
@@ -682,3 +713,33 @@ def validate_io(orch, namespaces, negative=False):
             LOG.info(f"IO validation for {subsys}|{pool_img} is successful.")
 
     LOG.info("IO Validation is Successfull on all RBD images..")
+
+
+def fetch_lb_groups(gateways, nodes):
+    """Fetch Load balancing group ids for given nodes."""
+    lb_group_ids = {}
+    for node in nodes:
+        nvmegwcli = check_gateway(gateways, node)
+        hostname = nvmegwcli.fetch_gateway_hostname()
+        lb_group_ids.update({hostname: nvmegwcli.ana_group_id})
+    return lb_group_ids
+
+
+def get_network_mask(gateways):
+    ips = []
+
+    for gateway in gateways:
+        gw_ip = getattr(gateway.node, "ip_address", None)
+        if gw_ip:
+            ips.append(ipaddress.ip_address(gw_ip))
+    if not ips:
+        return None
+
+    ip_ints = [int(ip) for ip in ips]
+    min_ip = min(ip_ints)
+    max_ip = max(ip_ints)
+    diff = min_ip ^ max_ip  # XOR min & max → find differing bits → derive prefix length
+    prefix_len = 32 - diff.bit_length()  # Build subnet from first IP + prefix length
+
+    network = ipaddress.ip_network(f"{ips[0]}/{prefix_len}", strict=False)
+    return str(network)

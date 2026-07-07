@@ -38,6 +38,7 @@ def deploy_smb_service_imperative(
     custom_dns,
     clustering="default",
     earmark=None,
+    client_compat=None,
 ):
     """Deploy smb services
     Args:
@@ -80,6 +81,7 @@ def deploy_smb_service_imperative(
             smb_user_password,
             custom_dns,
             clustering,
+            client_compat,
         )
 
         # Check smb cluster
@@ -249,7 +251,7 @@ def smb_cleanup(
         remove_smb_share(installer, smb_shares, smb_cluster_id)
         # Remove smb cluster
         remove_smb_cluster(installer, smb_cluster_id)
-        sleep(9)
+        sleep(3)
         # Remove subvolume and subvolume group
         # List subvolumes
         cmd = (
@@ -268,7 +270,7 @@ def smb_cleanup(
             f"cephadm shell -- ceph fs subvolumegroup rm {volume} {group_name} --force"
         )
         installer.exec_command(sudo=True, cmd=cmd)
-        sleep(9)
+        sleep(3)
 
     except Exception as e:
         raise CephadmOpsExecutionError(
@@ -355,6 +357,7 @@ def create_smb_cluster(
     smb_user_password,
     custom_dns,
     clustering,
+    client_compat,
 ):
     """Create smb cluster
     Args:
@@ -368,23 +371,45 @@ def create_smb_cluster(
     """
     try:
         if auth_mode == "user":
-            CephAdm(installer).ceph.smb.cluster.create(
-                smb_cluster_id,
-                auth_mode,
-                define_user_pass=f"{smb_user_name}%{smb_user_password}",
-                placement="label:smb",
-                clustering=clustering,
-            )
+            if client_compat:
+                CephAdm(installer).ceph.smb.cluster.create(
+                    smb_cluster_id,
+                    auth_mode,
+                    define_user_pass=f"{smb_user_name}%{smb_user_password}",
+                    placement="label:smb",
+                    clustering=clustering,
+                    client_compat=client_compat,
+                )
+            else:
+                CephAdm(installer).ceph.smb.cluster.create(
+                    smb_cluster_id,
+                    auth_mode,
+                    define_user_pass=f"{smb_user_name}%{smb_user_password}",
+                    placement="label:smb",
+                    clustering=clustering,
+                )
         elif auth_mode == "active-directory":
-            CephAdm(installer).ceph.smb.cluster.create(
-                smb_cluster_id,
-                auth_mode,
-                domain_realm=domain_realm,
-                domain_join_user_pass=f"{smb_user_name}%{smb_user_password}",
-                custom_dns=custom_dns,
-                placement="label:smb",
-                clustering=clustering,
-            )
+            if client_compat:
+                CephAdm(installer).ceph.smb.cluster.create(
+                    smb_cluster_id,
+                    auth_mode,
+                    domain_realm=domain_realm,
+                    domain_join_user_pass=f"{smb_user_name}%{smb_user_password}",
+                    custom_dns=custom_dns,
+                    placement="label:smb",
+                    clustering=clustering,
+                    client_compat=client_compat,
+                )
+            else:
+                CephAdm(installer).ceph.smb.cluster.create(
+                    smb_cluster_id,
+                    auth_mode,
+                    domain_realm=domain_realm,
+                    domain_join_user_pass=f"{smb_user_name}%{smb_user_password}",
+                    custom_dns=custom_dns,
+                    placement="label:smb",
+                    clustering=clustering,
+                )
     except Exception as e:
         raise CephadmOpsExecutionError(f"Fail to create smb cluster, Error {e}")
 
@@ -425,6 +450,7 @@ def create_smb_share(
     """
     try:
         for i in range(0, len(smb_shares)):
+            sleep(15)
             CephAdm(installer).ceph.smb.share.create(
                 smb_cluster_id,
                 smb_shares[i],
@@ -598,11 +624,8 @@ def smb_cifs_mount(
     """
     try:
         # Create cifs mount dir
-        cmd = f"mkdir {cifs_mount_point}"
-        client.exec_command(
-            sudo=True,
-            cmd=cmd,
-        )
+        cmd = f"mkdir -p {cifs_mount_point}"
+        client.exec_command(sudo=True, cmd=cmd)
         if public_addrs:
             # Mount smb share using cifs
             if auth_mode == "user":
@@ -610,10 +633,7 @@ def smb_cifs_mount(
                     f"mount.cifs //{public_addrs[0]}/{smb_share} {cifs_mount_point}"
                     f" -o username={smb_user_name},password={smb_user_password}"
                 )
-                client.exec_command(
-                    sudo=True,
-                    cmd=cmd,
-                )
+                client.exec_command(sudo=True, cmd=cmd)
             elif auth_mode == "active-directory":
                 cmd = (
                     f"mount.cifs //{public_addrs[0]}/{smb_share} {cifs_mount_point}"
@@ -997,3 +1017,41 @@ def config_smb_images(installer, samba_image, samba_metrics_image):
         installer.exec_command(sudo=True, cmd=cmd)
     except Exception as e:
         raise CephadmOpsExecutionError(f"Fail to configure smb images, Error {e}")
+
+
+def samba_kernel_mount(samba_client, mount_point, mon_node_ip, sub_dir):
+    """
+    Mounts the sub volume or volume using kernel mount
+    Args:
+        samba_client:
+        mount_point:
+        mon_node_ip:
+        sub_dir: specific directory subvolume or volume
+    Returns:
+
+    Exceptions:
+        assertion error will occur if the device is not mounted
+    """
+    log.info("Creating mounting dir:")
+    samba_client.exec_command(
+        sudo=True, cmd=f"mkdir -p {mount_point}", long_running=True
+    )
+    samba_client.exec_command(
+        sudo=True,
+        cmd=f"ceph auth get-key client.admin -o "
+        f"/etc/ceph/{samba_client.hostname}.secret",
+        long_running=True,
+    )
+    cmd = (
+        f"mount -t ceph {mon_node_ip}:{sub_dir} {mount_point} "
+        f"-o name=admin,"
+        f"secretfile=/etc/ceph/{samba_client.hostname}.secret,"
+        f"noshare"
+    )
+    cmd_rc = samba_client.exec_command(sudo=True, cmd=cmd, long_running=True)
+
+    if cmd_rc:
+        raise CephadmOpsExecutionError(
+            f"Ceph Kernel Command failed with error: {cmd_rc}"
+        )
+    return cmd_rc

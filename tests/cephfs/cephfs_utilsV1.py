@@ -28,6 +28,7 @@ from ceph.parallel import parallel
 from ceph.utils import check_ceph_healthly
 from cli.ceph.ceph import Ceph
 from cli.cephadm.cephadm import CephAdm
+from cli.utilities.filesys import Mount
 from compute.openstack import get_openstack_driver
 from tests.cephfs.exceptions import ValueMismatchError
 from utility.log import Log
@@ -129,7 +130,7 @@ class FsUtils(object):
             out, rc = client.node.exec_command(sudo=True, cmd="ls /home/cephuser")
             if "smallfile" not in out:
                 client.node.exec_command(
-                    cmd="git clone https://github.com/bengland2/smallfile.git"
+                    cmd="git clone https://github.com/distributed-system-analysis/smallfile.git"
                 )
             if "iozone" not in out:
                 cmd_list = [
@@ -2360,23 +2361,44 @@ class FsUtils(object):
             )
         return 0
 
+    @retry(CommandFailed, tries=30, delay=10, backoff=1)
+    def _wait_for_pid_signal(self, node, daemon, sig, pids_before, expect_exit):
+        out_after, rc_after = node.exec_command(
+            cmd=f"pgrep {daemon}",
+            container_exec=False,
+            check_ec=False,
+        )
+        pids_after = out_after.splitlines() if not rc_after else []
+        still_running = set(pids_before) & set(pids_after)
+        log.info(
+            f"PIDs after {sig.name}: {pids_after}, "
+            f"still running from before: {still_running}"
+        )
+        if expect_exit and still_running:
+            raise CommandFailed(
+                f"{sig.name} failed. PIDs still running: {still_running}"
+            )
+        if not expect_exit and not pids_after:
+            raise CommandFailed(f"{sig.name} failed. {daemon} exited unexpectedly")
+
     def pid_signal(
         self,
         node,
         daemon,
         sig=signal.SIGTERM,
         expect_exit=True,
-        wait=10,
     ):
         out, rc = node.exec_command(
             cmd=f"pgrep {daemon}",
             container_exec=False,
             check_ec=False,
         )
-        if rc:
-            log.info(f"No running process found for {daemon}")
+        pids_before = [pid for pid in out.splitlines() if pid.strip()] if not rc else []
+        if not pids_before:
+            log.info(
+                f"No running {daemon} process found on {node.hostname}, skipping {sig.name}"
+            )
             return 0
-        pids_before = [pid for pid in out.splitlines() if pid]
         log.info(f"PIDs before {sig.name}: {pids_before}")
         for pid in pids_before:
             node.exec_command(
@@ -2385,23 +2407,7 @@ class FsUtils(object):
                 container_exec=False,
                 check_ec=False,
             )
-        sleep(wait)
-        out_after, rc_after = node.exec_command(
-            cmd=f"pgrep {daemon}",
-            container_exec=False,
-            check_ec=False,
-        )
-        pids_after = out_after.splitlines() if not rc_after else []
-        log.info(f"PIDs after {sig.name}: {pids_after}")
-        if expect_exit:
-            if set(pids_before) & set(pids_after):
-                raise CommandFailed(
-                    f"{sig.name} failed. PIDs still running: "
-                    f"{set(pids_before) & set(pids_after)}"
-                )
-        else:
-            if not pids_after:
-                raise CommandFailed(f"{sig.name} failed. {daemon} exited unexpectedly")
+        self._wait_for_pid_signal(node, daemon, sig, pids_before, expect_exit)
         return 0
 
     def network_disconnect(self, ceph_object, sleep_time=20):
@@ -3284,6 +3290,8 @@ os.system('sudo systemctl start  network')
         :param nfs_export:
         :param nfs_mount_dir:
         """
+        Mount(client)._ensure_nfs_utils()
+
         client.exec_command(sudo=True, cmd=f"mkdir -p {nfs_mount_dir}")
         command = f"mount -t nfs -o vers=4,port={kwargs.get('port', '2049')} {nfs_server}:{nfs_export} {nfs_mount_dir}"
         if kwargs.get("fstab"):
@@ -3493,7 +3501,7 @@ os.system('sudo systemctl start  network')
 
                 if "smallfile" not in out:
                     node.exec_command(
-                        cmd="git clone https://github.com/bengland2/" "smallfile.git"
+                        cmd="git clone https://github.com/distributed-system-analysis/smallfile.git"
                     )
 
                 out, rc = node.exec_command(sudo=True, cmd="rpm -qa")
@@ -3527,7 +3535,8 @@ os.system('sudo systemctl start  network')
                 out, rc = node.exec_command(sudo=True, cmd="ls /home/cephuser")
                 if "smallfile" not in out:
                     node.exec_command(
-                        cmd="git clone " "https://github.com/bengland2/smallfile.git"
+                        cmd="git clone "
+                        "https://github.com/distributed-system-analysis/smallfile.git"
                     )
         self.mounting_dir = "".join(
             random.choice(string.ascii_lowercase + string.digits)
@@ -5514,7 +5523,7 @@ os.system('sudo systemctl start  network')
             returns status,data_avail,data_used,meta_avail,meta_used and mds name from ceph fs status in dict format
         """
         fs_status_dict = {}
-        fs_status_info = self.get_fs_status_dump(client)
+        fs_status_info = self.get_fs_status_dump(client, vol_name=fs_name)
         log.debug(f"Output: {fs_status_info}")
 
         status = self.fetch_value_from_json_output(
@@ -5674,6 +5683,59 @@ os.system('sudo systemctl start  network')
         )
         return fs_dump_info_dict
 
+    def collect_fs_dump_for_validation_1(self, client, fs_name):
+        """
+        Gets the output using fs dump and collected required info
+        Args:
+            client: client node
+            fs_name: File system name
+        Return:
+            returns status, fs_name, fsid, rank and mds name from ceph fs dump in dict format
+        """
+        fs_dump_info_dict = {}
+        fs_dump = self.get_fs_dump(client)
+        log.debug(fs_dump)
+
+        target_fs = None
+        for fs_entry in fs_dump.get("filesystems", []):
+            mdsmap = fs_entry.get("mdsmap", {})
+            if mdsmap.get("fs_name") == fs_name:
+                target_fs = fs_entry
+                break
+
+        if target_fs is None:
+            log.error(f"Filesystem '{fs_name}' not found in fs dump")
+            return fs_dump_info_dict
+
+        mdsmap = target_fs["mdsmap"]
+        fsname = mdsmap["fs_name"]
+        fsid = target_fs["id"]
+
+        active_mds = None
+        for gid_info in mdsmap.get("info", {}).values():
+            if "active" in gid_info.get("state", ""):
+                active_mds = gid_info
+                break
+
+        if active_mds is None:
+            log.error(f"No active MDS found for filesystem '{fs_name}' in fs dump")
+            return fs_dump_info_dict
+
+        status = active_mds["state"].split(":", 1)[1]
+        rank = active_mds["rank"]
+        mds_name = active_mds["name"]
+
+        fs_dump_info_dict.update(
+            {
+                "status": status,
+                "fsname": fsname,
+                "fsid": fsid,
+                "rank": rank,
+                "mds_name": mds_name,
+            }
+        )
+        return fs_dump_info_dict
+
     @retry(CommandFailed, tries=3, delay=10)
     def collect_fs_get_for_validation(self, client, fs_name):
         """
@@ -5753,7 +5815,7 @@ os.system('sudo systemctl start  network')
         for key in keys_to_check:
             # Find dictionaries that contain the key
             dicts_with_key = [d for d in dicts if key in d]
-
+            log.info("dicts_with_key: %s for key %s", dicts_with_key, key)
             if len(dicts_with_key) == 0:
                 log.error(f"Key '{key}' not found in any dictionary")
                 return False
@@ -5763,7 +5825,7 @@ os.system('sudo systemctl start  network')
             else:
                 # Collect values for the key
                 values = [d[key] for d in dicts_with_key]
-
+                log.info("Collect values for the key: %s: values: %s", key, values)
                 # Check if values are lists
                 if all(isinstance(v, list) for v in values):
                     # Compare list contents

@@ -9,6 +9,7 @@ from cli.ops.cephadm_ansible import (
     exec_cephadm_preflight,
 )
 from cli.utilities.packages import Package, Repos
+from cli.utilities.utils import repo_uses_flat_tools_compose_layout
 from utility.log import Log
 
 from .configs import get_registry_details
@@ -32,6 +33,7 @@ EPEL_REPOS = {
     "rhel-7": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm",
     "rhel-8": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm",
     "rhel-9": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm",
+    "rhel-10": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm",
 }
 
 
@@ -389,10 +391,7 @@ def get_tools_repo(repo, ibm_build=False):
     if repo.endswith(".repo"):
         return repo
 
-    if "repo.qe.ceph.lab" in repo:
-        return f"{repo}/Tools"
-
-    if ibm_build:
+    if repo_uses_flat_tools_compose_layout(repo, ibm_build):
         return f"{repo}/Tools"
 
     return f"{repo}/compose/Tools/x86_64/os"

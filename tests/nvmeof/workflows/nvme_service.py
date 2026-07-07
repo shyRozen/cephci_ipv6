@@ -2,12 +2,18 @@
 NVMe Service, Gateway Group, and Gateway classes for NVMeoF workflows.
 """
 
+import json
+import time
+
+from looseversion import LooseVersion
+
 from ceph.ceph_admin.orch import Orch
 from ceph.utils import get_nodes_by_ids
 from tests.cephadm import test_nvmeof
 from tests.nvmeof.workflows.constants import DEFAULT_NVME_METADATA_POOL, DEFAULT_PORT
 from tests.nvmeof.workflows.nvme_gateway import create_gateway
 from tests.nvmeof.workflows.nvme_utils import (
+    check_and_enable_nvmeof_module,
     nvme_gw_cli_version_adapter,
     setup_firewalld,
 )
@@ -31,6 +37,7 @@ class NVMeService:
         self.clients = self.ceph_cluster.get_nodes(role="client")
         if not self.clients:
             raise ValueError("No client nodes found in the cluster")
+        self.ceph_version = self._get_ceph_version()
         self.nvme_metadata_pool = self._determine_nvme_metadata_pool()
         self.rbd_pool = config.get("rbd_pool")
         if not self.rbd_pool:
@@ -47,16 +54,23 @@ class NVMeService:
         if self.inband_auth_mode:
             self.is_spec_or_mtls = True
 
+    def _get_ceph_version(self):
+        return get_ceph_version_from_cluster(self.clients[0])
+
     def _determine_nvme_metadata_pool(self):
         """
         Determine the NVMe metadata pool name based on ceph_version.
-        If ceph_version < 20.0, use config['nvme_metadata_pool'].
-        If ceph_version >= 20.0, use DEFAULT_NVME_RBD_POOL.
+        If ceph_version >= 20.2.1, use DEFAULT_NVME_METADATA_POOL (.nvmeof).
+        If ceph_version < 20.2.1, use config['nvme_metadata_pool'].
         """
-        current_ceph_version = get_ceph_version_from_cluster(self.clients[0])
-        if current_ceph_version.startswith("20.0"):
+        if LooseVersion(self.ceph_version) >= LooseVersion("20.2.1"):
+            # print the nvmeof metadata pool
+            LOG.info(f"Using NVMeoF metadata pool: {DEFAULT_NVME_METADATA_POOL}")
             return DEFAULT_NVME_METADATA_POOL
         else:
+            LOG.info(
+                f"Using NVMe metadata pool: {self.config.get('nvme_metadata_pool')}"
+            )
             if not self.config.get("nvme_metadata_pool"):
                 raise ValueError("Please provide RBD pool name via nvme_metadata_pool")
             return self.config.get("nvme_metadata_pool")
@@ -65,10 +79,7 @@ class NVMeService:
         """Delete the NVMe gateway service."""
         ceph_cluster = self.ceph_cluster
 
-        gw_group = self.group
-        pool = self.nvme_metadata_pool
-        service_name = f"nvmeof.{pool}"
-        service_name = f"{service_name}.{gw_group}" if gw_group else service_name
+        service_name = self.service_name
         cfg = {
             "no_cluster_state": False,
             "config": {
@@ -97,7 +108,11 @@ class NVMeService:
             },
         }
 
-        # Add encryption if specified
+        # Delete pool key from spec if ceph_version >= 20.2.1
+        if LooseVersion(self.ceph_version) >= LooseVersion("20.2.1"):
+            spec["spec"].pop("pool")
+
+        # Add encryption if specified (TLS pre-shared key generated on installer)
         if self.inband_auth_mode:
             spec["encryption"] = True
 
@@ -130,7 +145,10 @@ class NVMeService:
                     ] = f"{self.nvme_metadata_pool}.{self.group}"
                     cfg["config"]["specs"][0]["spec"]["group"] = self.group
                 else:
-                    cfg["config"]["pos_args"].append(self.group)
+                    if LooseVersion(self.ceph_version) >= LooseVersion("20.2.1"):
+                        cfg["config"]["args"].update({"group": self.group})
+                    else:
+                        cfg["config"]["pos_args"].append(self.group)
 
                 # Add rebalance period if specified
                 if self.config.get("rebalance_period", False):
@@ -159,6 +177,11 @@ class NVMeService:
                 },
             }
 
+            if LooseVersion(self.ceph_version) >= LooseVersion("20.2.1"):
+                cfg["config"]["args"].update({"group": self.group})
+                # Delete pos_args key from cfg
+                cfg["config"].pop("pos_args")
+
         return cfg
 
     def _get_placement_config(self, config, gw_nodes):
@@ -185,9 +208,55 @@ class NVMeService:
         """
         # Open up firewall ports if running.
         setup_firewalld(self.gw_nodes)
+        # Enable ceph mgr module enable nvmeof if not enabled
+        check_and_enable_nvmeof_module(
+            ceph_cluster=self.ceph_cluster, ceph_version=self.ceph_version
+        )
         deploy_config = self._create_spec_deployment_config()
         if deploy_config:
             test_nvmeof.run(self.ceph_cluster, **deploy_config)
+
+        # Once the service is deployed, get the service name and service id and store it
+        ceph = Orch(self.ceph_cluster, **{})
+        cmd = "ceph orch ls nvmeof --format json"
+        out, _ = ceph.shell(args=[cmd])
+        services = json.loads(out)
+        self.service_name = None
+        self.service_id = None
+        for service in services:
+            # If we have multiple services in single cluster then we need to filter the service by group
+            # so that we will get the correct service name and service id for the group.
+            # when we take services[0]["service_name"] only first service name will be returned
+            # so we need to filter the service by group.
+            if "nvmeof" in service["service_name"]:
+                if self.group:
+                    if self.group in service["service_name"]:
+                        service_name = service["service_name"]
+                        service_id = service["service_id"]
+                        LOG.info(
+                            f"Service name: {service_name}, Service id: {service_id}"
+                        )
+                        self.service_name = service_name
+                        self.service_id = service_id
+                        break
+                else:
+                    service_name = service["service_name"]
+                    service_id = service["service_id"]
+                    LOG.info(f"Service name: {service_name}, Service id: {service_id}")
+                    self.service_name = service_name
+                    self.service_id = service_id
+                    break
+
+    def redeploy(self, wait_sec=30):
+        """Redeploy the NVMe-oF orchestrator service after spec apply."""
+        if not self.service_name:
+            raise RuntimeError("NVMe-oF service name not set; deploy the service first")
+        orch = Orch(self.ceph_cluster, **{})
+        cmd = f"ceph orch redeploy {self.service_name}"
+        LOG.info("Redeploying NVMe-oF service: %s", cmd)
+        orch.shell(args=[cmd])
+        if wait_sec:
+            time.sleep(wait_sec)
 
     def init_gateways(self):
         """

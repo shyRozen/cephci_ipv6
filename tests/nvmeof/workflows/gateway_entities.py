@@ -1,6 +1,8 @@
 import json
 from copy import deepcopy
 
+from looseversion import LooseVersion
+
 from ceph.nvmeof.initiators.linux import Initiator
 from ceph.parallel import parallel
 from ceph.utils import get_node_by_id
@@ -8,9 +10,15 @@ from tests.nvmeof.workflows.constants import (
     DEFAULT_LISTENER_PORT,
     DEFAULT_NVME_METADATA_POOL,
 )
+from tests.nvmeof.workflows.inband_auth import create_dhchap_key
 from tests.nvmeof.workflows.initiator import NVMeInitiator
+from tests.nvmeof.workflows.nvme_utils import get_network_mask
 from utility.log import Log
-from utility.utils import generate_unique_id, log_json_dump
+from utility.utils import (
+    generate_unique_id,
+    get_ceph_version_from_cluster,
+    log_json_dump,
+)
 
 LOG = Log(__name__)
 
@@ -35,30 +43,38 @@ def validate_subsystems(nvme_service, subsystem_config):
     if not subsystem_list:
         raise ValueError("No subsystems found after configuration")
 
-    if len(subsystem_list) != len(subsystem_config):
-        raise ValueError(
-            f"Mismatch in number of configured subsystems: "
-            f"expected {len(subsystem_config)}, found {len(subsystem_list)}"
+    actual_nqns = {
+        s.get("nqn") or s.get("subnqn")
+        for s in subsystem_list
+        if s.get("nqn") or s.get("subnqn")
+    }
+    for sub_cfg in subsystem_config:
+        nqn = sub_cfg.get("nqn") or sub_cfg.get("subnqn")
+        if not nqn:
+            raise ValueError("Subsystem NQN not provided in subsystem_config")
+        if nqn not in actual_nqns:
+            raise ValueError(
+                f"Subsystem {nqn} not found in configured subsystems "
+                f"(have {sorted(actual_nqns)})"
+            )
+
+    if len(subsystem_list) > len(subsystem_config):
+        LOG.info(
+            "More subsystems present on gateway than in this test config "
+            "(%s from config, %s total); treating extras as pre-existing",
+            len(subsystem_config),
+            len(subsystem_list),
         )
 
-    for i, sub_cfg in enumerate(subsystem_config):
-        if sub_cfg.get("nqn") in subsystem_list[i].get("nqn") or sub_cfg.get(
-            "subnqn"
-        ) in subsystem_list[i].get("subnqn"):
-            continue
-        raise ValueError(
-            f"Subsystem {sub_cfg.get('nqn') or sub_cfg.get('subnqn')} not found in configured subsystems"
-        )
 
-
-def configure_subsystems(nvme_service):
+def configure_subsystems(nvme_service, ceph_cluster=None, subsystem_config=None):
     """
     Configure subsystems, hosts, and namespaces for this gateway group.
     This is done once per group, not per gateway.
     Args:
         nvme_service: NvmeService instance
-        exec_parallel: Whether to execute subsystem configuration in parallel
-        (default: False, sequential execution)
+        ceph_cluster: Ceph cluster object
+        subsystem_config: Optional subsystem list; defaults to nvme_service.config
     """
 
     # Configure subsystem
@@ -78,32 +94,67 @@ def configure_subsystems(nvme_service):
         if sub_cfg.get("serial"):
             sub_args["serial-number"] = sub_cfg.get("serial")
 
+        # Configure inband authentication if specified
+        if sub_cfg.get("inband_auth"):
+            sub_cfg["gw_group"] = nvme_service.group
+
+            # Uncomment the below lines for debugging
+            gateway.gateway.set_log_level(**{"args": {"level": "DEBUG"}})
+            gateway.loglevel.set(**{"args": {"level": "DEBUG"}})
+
+            # Get auth_mode from nvme_service config (gwgroup level) if not in sub_cfg
+            if "auth_mode" not in sub_cfg and nvme_service.config.get(
+                "inband_auth_mode"
+            ):
+                sub_cfg["auth_mode"] = nvme_service.config.get("inband_auth_mode")
+
+            # if sub_cfg.get("inband_auth"):
+            sub_cfg.update(
+                {"initiators": create_dhchap_key(sub_cfg, nvme_service.ceph_cluster)}
+            )
+            sub_args["dhchap-key"] = sub_cfg["dhchap-key"]
+        elif sub_cfg.get("dhchap-key"):
+            sub_args["dhchap-key"] = sub_cfg["dhchap-key"]
+
         # Add Subsystem
         release = nvme_service.ceph_cluster.rhcs_version
         if release >= "8.0":
             no_group_append = sub_cfg.get("no-group-append", True)
         else:
             no_group_append = sub_cfg.get("no-group-append", False)
-        gateway.subsystem.add(
-            **{
-                "args": {
-                    **sub_args,
-                    **{
-                        "max-namespaces": sub_cfg.get("max_ns", 32),
-                        "enable-ha": sub_cfg.get("enable_ha", False),
-                        "no-group-append": no_group_append,
-                    },
-                }
-            }
-        )
 
-    subsystem_config = nvme_service.config.get("subsystems", [])
+        ceph_version = get_ceph_version_from_cluster(
+            ceph_cluster.get_nodes(role="client")[0]
+        )
+        args = {
+            **sub_args,
+            "max-namespaces": sub_cfg.get("max_ns", 32),
+            "enable-ha": sub_cfg.get("enable_ha", False),
+            "no-group-append": no_group_append,
+        }
+
+        if LooseVersion(ceph_version) >= LooseVersion("20.2.1"):
+            if sub_cfg.get("listener_port"):
+                args["port"] = sub_cfg.get("listener_port")
+            if sub_cfg.get("secure_listener"):
+                args["secure_listeners"] = sub_cfg.get("secure_listener")
+            args["network-mask"] = get_network_mask(nvme_service.gateways)
+
+        gateway.subsystem.add(**{"args": args})
+
+    if subsystem_config is None:
+        subsystem_config = nvme_service.config.get("subsystems", [])
     for sub_cfg in subsystem_config:
         with parallel() as p:
             p.spawn(configure_subsystem, nvme_service, sub_cfg)
 
     # Validate subsystems
     validate_subsystems(nvme_service, subsystem_config)
+    initiators = []
+    for sub_cfg in subsystem_config:
+        if sub_cfg.get("initiators", []):
+            initiators.extend(sub_cfg["initiators"])
+    return initiators
 
 
 def validate_hosts(gateway, expected_hosts, nqn):
@@ -130,19 +181,40 @@ def validate_hosts(gateway, expected_hosts, nqn):
                 )
 
 
-def configure_hosts(gateway, config: dict, ceph_cluster=None):
+def configure_hosts(gateway, config: dict, ceph_cluster=None, initiators=None):
     """
     Configure hosts for this specific gateway.
     This is called per gateway since each gateway needs its own hosts.
     Args:
         gateway: NVMeGateway instance
-        config: Test configuration.
+        config: Test configuration (can be full config or subsystem-specific config).
+        ceph_cluster: Ceph cluster object
+        initiators: Optional list to append initiators to. If None, a new list is created and returned.
+    Returns:
+        List of initiators created during host configuration
     """
-    # Configure hosts if specified
     subsystem_config = config.get("subsystems", [])
+
+    # Initialize initiators list if not provided
+    if initiators is None:
+        initiators = []
+
     for sub_cfg in subsystem_config:
         # Configure hosts if specified
         nqn = sub_cfg.get("nqn") or sub_cfg.get("subnqn")
+        LOG.info(f"configure_hosts: Processing subsystem {nqn}")
+
+        # Ensure subnqn is set in sub_cfg (needed for create_dhchap_key)
+        if "subnqn" not in sub_cfg:
+            sub_cfg["subnqn"] = nqn
+
+        # Ensure auth_mode is set from config level if not already set in subsystem config
+        if "auth_mode" not in sub_cfg and config.get("inband_auth_mode"):
+            sub_cfg["auth_mode"] = config.get("inband_auth_mode")
+            LOG.info(
+                f"configure_hosts: Setting auth_mode={sub_cfg['auth_mode']} for subsystem {nqn}"
+            )
+
         sub_args = {"subsystem": nqn}
         if sub_cfg.get("allow_host"):
             gateway.host.add(
@@ -156,15 +228,80 @@ def configure_hosts(gateway, config: dict, ceph_cluster=None):
             hosts = sub_cfg["hosts"]
             if not isinstance(hosts, list):
                 hosts = [hosts]
-
+            LOG.info(f"configure_hosts: Found {len(hosts)} hosts for subsystem {nqn}")
             for host in hosts:
                 node_id = host.get("node") if isinstance(host, dict) else host
                 initiator_node = get_node_by_id(ceph_cluster, node_id)
-                initiator = NVMeInitiator(initiator_node)
+
+                # Check if initiator already exists from configure_subsystems (for bidirectional auth)
+                # Only check initiators from current group's list, not global dictionary
+                initiator = None
+                if initiators:
+                    # Look for existing initiator with matching node and nqn
+                    # This ensures we only reuse initiators from the current gateway group
+                    for existing_init in initiators:
+                        if (
+                            existing_init.node.id == node_id
+                            and existing_init.nqn == nqn
+                        ):
+                            initiator = existing_init
+                            LOG.info(
+                                f"configure_hosts: Reusing existing initiator from current \
+                                    group for node={node_id}, nqn={nqn}"
+                            )
+                            break
+
+                # Generate key for host NQN if inband_auth is enabled and key doesn't exist
+                sub_cfg.pop("dhchap-key", None)
+                if sub_cfg.get("inband_auth"):
+                    if not initiator or not initiator.host_key:
+                        # Key doesn't exist, generate it
+                        # create_dhchap_key returns initiators with auth_mode set
+                        # Create a config with just this host for create_dhchap_key
+                        host_sub_cfg = sub_cfg.copy()
+                        host_sub_cfg["hosts"] = [host]
+                        # Pass only current group's initiators to avoid reusing initiators from other groups
+                        # This ensures each gateway group gets its own initiators
+                        host_initiators = create_dhchap_key(
+                            host_sub_cfg,
+                            ceph_cluster,
+                            update_host_key=True,
+                            initiators=initiators,  # Only pass current group's initiators
+                        )
+                        # create_dhchap_key returns a list, get the first (and only) initiator
+                        if host_initiators:
+                            initiator = host_initiators[0]
+                        else:
+                            # Fallback: create initiator if create_dhchap_key didn't return one
+                            if not initiator:
+                                initiator = NVMeInitiator(initiator_node)
+                            # Set auth_mode manually
+                            if "auth_mode" in host_sub_cfg:
+                                initiator.auth_mode = host_sub_cfg["auth_mode"]
+                    # Use existing host key if initiator already has one
+                    if initiator.host_key:
+                        host["dhchap-key"] = initiator.host_key
+                    sub_cfg["dhchap-key"] = host.get("dhchap-key")
+                    sub_args["dhchap-key"] = host.get("dhchap-key")
+                else:
+                    # No auth, create a basic initiator if not already exists
+                    if not initiator:
+                        initiator = NVMeInitiator(initiator_node)
+
                 initiator_nqn = initiator.initiator_nqn()
-                gateway.host.add(**{"args": {"subsystem": nqn, "host": initiator_nqn}})
+                LOG.info(
+                    f"configure_hosts: Adding host {initiator_nqn} to subsystem {nqn}"
+                )
+                gateway.host.add(**{"args": {**sub_args, "host": initiator_nqn}})
+                # Only append if not already in the list (avoid duplicates)
+                if initiator not in initiators:
+                    initiators.append(initiator)
 
             validate_hosts(gateway, [initiator_nqn], nqn)
+            LOG.info(
+                f"configure_hosts: Successfully configured {len(hosts)} hosts for subsystem {nqn}"
+            )
+    return initiators
 
 
 def validate_namespaces(gateway, expected_namespaces, nqn):
@@ -223,6 +360,12 @@ def configure_namespaces(gateway, config, opt_args={}, rbd_obj=None):
 
                 if bdev_cfg.get("pool"):
                     namespace_args.update({"rbd-pool": bdev_cfg["pool"]})
+
+                rados_namespace = bdev_cfg.get(
+                    "rados_namespace", sub_cfg.get("rados_namespace")
+                )
+                if rados_namespace:
+                    namespace_args.update({"rados-namespace": rados_namespace})
 
                 # consider adding option to create pool and image if it doesn't exist
                 # and also ns_create_image is false
@@ -315,8 +458,9 @@ def configure_listeners(gateways, config: dict, listeners=None):
     """
     # Configure listeners if specified
     subsystem_config = config.get("subsystems", [])
-    expected_listeners = []
+
     for sub_cfg in subsystem_config:
+        expected_listeners = []
         nqn = sub_cfg.get("nqn") or sub_cfg.get("subnqn")
         if not listeners:
             listeners = sub_cfg.get("listeners", [])
@@ -372,9 +516,11 @@ def configure_gw_entities(nvme_service, rbd_obj=None, cluster=None):
                        (default: False, sequential execution)
     """
     subsystem_config = nvme_service.config.get("subsystems", [])
+    ceph_version = get_ceph_version_from_cluster(cluster.get_nodes(role="client")[0])
     if subsystem_config:
-        configure_subsystems(nvme_service)
-        configure_listeners(nvme_service.gateways, nvme_service.config)
+        configure_subsystems(nvme_service, ceph_cluster=cluster)
+        if LooseVersion(ceph_version) <= LooseVersion("20.2.1"):
+            configure_listeners(nvme_service.gateways, nvme_service.config)
         configure_hosts(
             nvme_service.gateways[0], nvme_service.config, ceph_cluster=cluster
         )
@@ -383,7 +529,23 @@ def configure_gw_entities(nvme_service, rbd_obj=None, cluster=None):
         )
 
 
-def teardown(nvme_service, rbd_obj):
+def disconnect_initiators(nvme_service, node=None):
+    """
+    Disconnect all initiators from the NVMe service gateways.
+    Args:
+        nvme_service: NvmeService instance
+    """
+    if node:
+        initiator = Initiator(node)
+        initiator.disconnect_all()
+        return
+    for initiator_cfg in nvme_service.config.get("initiators", []):
+        node = get_node_by_id(nvme_service.ceph_cluster, initiator_cfg["node"])
+        initiator = Initiator(node)
+        initiator.disconnect_all()
+
+
+def teardown(nvme_service, rbd_obj, cleanup_config=None):
     """
     Cleanup NVMeoF gateways, initiators, and pools for the given config.
     Handles both single and multiple gateway groups.
@@ -394,10 +556,7 @@ def teardown(nvme_service, rbd_obj):
     rc = 0
     # Disconnect initiators
     if "initiators" in nvme_service.config.get("cleanup", []):
-        for initiator_cfg in nvme_service.config.get("initiators", []):
-            node = get_node_by_id(nvme_service.ceph_cluster, initiator_cfg["node"])
-            initiator = Initiator(node)
-            initiator.disconnect_all()
+        disconnect_initiators(nvme_service)
 
     # Delete the multiple subsystems across multiple gateways
     if "subsystems" in nvme_service.config["cleanup"]:
@@ -405,11 +564,6 @@ def teardown(nvme_service, rbd_obj):
         if not isinstance(config_sub_node, list):
             config_sub_node = [config_sub_node]
         for sub_cfg in config_sub_node:
-            node = (
-                nvme_service.config["gw_node"]
-                if "node" not in sub_cfg
-                else sub_cfg["node"]
-            )
             gateway = nvme_service.gateways[0]
             out, err = gateway.subsystem.delete(
                 **{"args": {"subsystem": sub_cfg["nqn"], "force": True}}
@@ -441,7 +595,7 @@ def teardown(nvme_service, rbd_obj):
                     else:
                         pools_to_delete.add(nvme_service.rbd_pool)
         pools_to_delete.add(nvme_service.rbd_pool)
-        if DEFAULT_NVME_METADATA_POOL not in nvme_service.nvme_metadata_pool:
+        if DEFAULT_NVME_METADATA_POOL == nvme_service.nvme_metadata_pool:
             pools_to_delete.add(nvme_service.nvme_metadata_pool)
         rbd_obj.clean_up(pools=list(pools_to_delete))
     return rc
@@ -472,8 +626,12 @@ def fetch_namespaces(gateway, failed_ana_grp_ids=[], get_list=False):
         if failed_ana_grp_ids:
             for ns in nspaces:
                 if ns["load_balancing_group"] in failed_ana_grp_ids:
-                    # <subsystem>|<nsid>|<pool_name>|<image>
-                    ns_info = f"nsid-{ns['nsid']}|{ns['rbd_pool_name']}|{ns['rbd_image_name']}"
+                    # <subsystem>|<nsid>|<pool_name>|<image> or <subsystem>|<nsid>|<pool_name>|<rados_namespace>/<image>
+                    # Handle both {pool}/{image} and {pool}/{rados_namespace}/{image} formats
+                    image_path = ns["rbd_image_name"]
+                    if ns.get("rados_namespace_name"):
+                        image_path = f"{ns['rados_namespace_name']}/{image_path}"
+                    ns_info = f"nsid-{ns['nsid']}|{ns['rbd_pool_name']}|{image_path}"
                     if get_list:
                         namespaces.append({"list": ns, "info": f"{sub_name}|{ns_info}"})
                     else:

@@ -20,6 +20,7 @@ class CephTestManifest:
         "https://raw.githubusercontent.com/ibmstorage/qe-ceph-manifest/refs/heads/main/"
     )
     SUPPORTED_PRODUCTS = ["community", "redhat", "ibm"]
+    RELEASE_MAP = {"reef": 7, "squid": 8, "tentacle": 9}
 
     def __init__(
         self,
@@ -28,6 +29,7 @@ class CephTestManifest:
         build_type: str,
         platform: str,
         datacenter: Optional[str] = None,
+        crimson: Optional[bool] = None,
     ) -> None:
         """Instance initialization.
 
@@ -37,6 +39,7 @@ class CephTestManifest:
             build_type  Refers to section in the manifest file to be read.
             platform    The base operating system.
             datacenter  The location where the tests are being executed.
+            crimson     Whether to use crimson osd image
         """
         if product not in self.SUPPORTED_PRODUCTS:
             raise RuntimeError("Unsupported product")
@@ -45,7 +48,7 @@ class CephTestManifest:
         self._release: str = release
         self._build_type: str = build_type
         self._platform: str = platform
-
+        self._crimson: bool = crimson or False
         if datacenter is None:
             # Retrieve from config
             try:
@@ -69,6 +72,9 @@ class CephTestManifest:
 
     @property
     def release(self) -> str:
+        if self.product == "community":
+            return self.RELEASE_MAP[self._release]
+
         return self._release
 
     @release.setter
@@ -121,16 +127,22 @@ class CephTestManifest:
         return self.build_info["images"]["ceph-base"]
 
     @property
+    def crimson_image(self) -> str:
+        return self.images.get("crimson_image", "")
+
+    @property
     def ceph_image_dtr(self) -> str:
         return self.ceph_image.split("/")[0]
 
     @property
     def ceph_image_tag(self) -> str:
+        if self._crimson:
+            return self.crimson_image.split(":")[-1]
         return self.ceph_image.split(":")[-1]
 
     @property
     def ceph_image_path(self) -> str:
-        _image_fqdn = self.ceph_image
+        _image_fqdn = self.crimson_image if self._crimson else self.ceph_image
         _image_without_dtr = _image_fqdn.split("/", 1)[1]
         return _image_without_dtr.split(":")[0]
 
@@ -193,11 +205,13 @@ class CephTestManifest:
             }
             }
         """
-        _msg = f"Retreving build details of {self.product} - {self.release}. "
+        # Please ensure to use _release instead of release, since release is a
+        # property and can be overridden.
+        _msg = f"Retreving build details of {self.product} - {self._release}. "
         _msg += f"Looking up {self.build_type} section."
         logger.debug(_msg)
 
-        manifest_file: str = f"{self.release}.yaml"
+        manifest_file: str = f"{self._release}.yaml"
         manifest_url: str = self.URI
 
         if self.product.lower() == "community":

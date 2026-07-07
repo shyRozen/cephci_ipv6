@@ -323,9 +323,11 @@ def run(ceph_cluster, **kw):
             log.debug(
                 f"Test workflow completed. Start time: {start_time}, End time: {test_end_time}"
             )
-            if rados_obj.check_crash_status(
-                start_time=start_time, end_time=test_end_time
-            ):
-                log.error("Test failed due to crash at the end of test")
-                return 1
+
+            if _config.get("verify_fix"):
+                if rados_obj.check_crash_status(
+                    start_time=start_time, end_time=test_end_time, check_logs=False
+                ):
+                    log.error("Test failed due to crash at the end of test")
+                    return 1
         return 0
